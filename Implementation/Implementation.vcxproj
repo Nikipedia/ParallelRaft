@@ -126,6 +126,7 @@
     <ClCompile Include="InputThread.cpp" />
     <ClCompile Include="IOPolling.cpp" />
     <ClCompile Include="LogWriter.cpp" />
+    <ClCompile Include="Measurement.cpp" />
     <ClCompile Include="RequestHandler.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
