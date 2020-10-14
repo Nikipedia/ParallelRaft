@@ -129,6 +129,9 @@
     <ClCompile Include="Measurement.cpp" />
     <ClCompile Include="RequestHandler.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="BlockingCollection.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

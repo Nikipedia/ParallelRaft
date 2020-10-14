@@ -2,6 +2,8 @@
 #include <memory>
 #include <random>
 #include "IOPolling.cpp"
+#include "BlockingCollection.h"
+using namespace code_machina;
 
 //serves as the PolarSwitch that simulates lots of IO requests
 
@@ -37,10 +39,9 @@
 		}
 	}*/
 
-	void threadedRequests(std::shared_ptr<vector<IOPolling::request>> leaderRequests)
+	void threadedRequests(BlockingCollection<IOPolling::request*> collection)
 	{
 		srand(time(NULL));
-		std::cout << &leaderRequests;
 		//infinite loop of request sending by writing into the shared buffer
 		char totalCount = 0;
 		while (true) {
@@ -55,7 +56,7 @@
 				r.modifiedCell = (char)(rand() % 255 + 1);
 				// small letter to write into the data blocks (assuming chars or strings as data)
 				r.data[0] = (char)(rand() % 26 + 65);
-				leaderRequests->push_back(r);
+				//collection.add(r);
 				std::cout << "request written\n";
 				totalCount = (totalCount + 1) % 32;
 			}
@@ -64,16 +65,126 @@
 
 	int main() {
 		IOPolling leader;
-		std::shared_ptr<vector<IOPolling::request>> requestPointer;
+		BlockingCollection<IOPolling::request*> requestQueue(10);
+		std::thread producer_thread([&requestQueue]() {
+			char totalCount = 0;
+			while (true)
+			{
+				IOPolling::request* r = new IOPolling::request;
+				r->number = totalCount;
+				// r for read, w for write, could contain more for e.g. new insertion of data
+				r->type = 'w';
+				// data block "index" to edit
+				r->modifiedCell = (char)(rand() % 255 + 1);
+				// small letter to write into the data blocks (assuming chars or strings as data)
+				r->data[0] = (char)(rand() % 26 + 65);
+				//collection.add(r);
+				std::cout << "request " << (int)totalCount << " written\n";
+				totalCount = (totalCount + 1) % 32;
+
+				// blocks if collection.size() == collection.bounded_capacity()
+				requestQueue.add(r);
+				std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
+			}
+			});
+
+
+		// a simple blocking consumer
+		std::thread consumer_thread([&requestQueue]() {
+			int recentNumber = 0;
+			int counter = 0;
+			int lookBehindOne = 0;
+			int lookBehindTwo = 0;
+			while (!requestQueue.is_completed())
+			{
+				IOPolling::request* data;
+
+				// take will block if there is no data to be taken
+				auto status = requestQueue.take(data);
+
+				if (status == BlockingCollectionStatus::Ok)
+				{
+					recentNumber = data->number;
+					std::cout << "Thread 1 Read " << (int)data->number << "\n";
+
+					data->lookBehind[0] = lookBehindOne;
+					data->lookBehind[1] = lookBehindTwo;
+					lookBehindTwo = lookBehindOne;
+					lookBehindOne = data->modifiedCell;
+
+
+					counter = (counter + 1) % 32;
+				}
+			}
+			});
+
+		std::thread consumer2_thread([&requestQueue]() {
+			int recentNumber = 0;
+			int counter = 0;
+			int lookBehindOne = 0;
+			int lookBehindTwo = 0;
+			while (!requestQueue.is_completed())
+			{
+				IOPolling::request* data;
+
+				// take will block if there is no data to be taken
+				auto status = requestQueue.take(data);
+
+				if (status == BlockingCollectionStatus::Ok)
+				{
+					recentNumber = data->number;
+					std::cout << "Thread 2 Read " << (int)data->number << "\n";
+
+					data->lookBehind[0] = lookBehindOne;
+					data->lookBehind[1] = lookBehindTwo;
+					lookBehindTwo = lookBehindOne;
+					lookBehindOne = data->modifiedCell;
+
+
+					counter = (counter + 1) % 32;
+				}
+			}
+			});
+
+		std::thread consumer3_thread([&requestQueue]() {
+			int recentNumber = 0;
+			int counter = 0;
+			int lookBehindOne = 0;
+			int lookBehindTwo = 0;
+			while (!requestQueue.is_completed())
+			{
+				IOPolling::request* data;
+
+				// take will block if there is no data to be taken
+				auto status = requestQueue.take(data);
+
+				if (status == BlockingCollectionStatus::Ok)
+				{
+					recentNumber = data->number;
+					std::cout << "Thread 3 Read " << (int)data->number << "\n";
+
+					data->lookBehind[0] = lookBehindOne;
+					data->lookBehind[1] = lookBehindTwo;
+					lookBehindTwo = lookBehindOne;
+					lookBehindOne = data->modifiedCell;
+
+
+					counter = (counter + 1) % 32;
+				}
+			}
+			});
+
+
+		//std::shared_ptr<vector<IOPolling::request>> requestPointer;
 		std::shared_ptr<IOPolling::request[]> writingPointer(new IOPolling::request[32]);
 		std::vector<IOPolling::request> queuePointer;
-		std::thread inputThread(threadedRequests, requestPointer);
-		std::thread leaderReadThread(&IOPolling::listener, &leader, requestPointer, writingPointer, queuePointer);
+		//std::thread inputThread(threadedRequests, requestQueue);
+		//std::thread leaderReadThread(&IOPolling::listener, &leader, requestQueue, writingPointer, queuePointer);
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-		inputThread.detach();
-		inputThread.~thread();
-		leaderReadThread.detach();
-		leaderReadThread.~thread();
+		//inputThread.detach();
+		//inputThread.~thread();
+		//leaderReadThread.detach();
+		//leaderReadThread.~thread();
 		IOPolling::request r = *(writingPointer.get());
 
 	}

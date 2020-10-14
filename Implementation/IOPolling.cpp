@@ -3,8 +3,10 @@
 #include <iostream>
 #include <thread>
 #include <queue>
+#include "BlockingCollection.h"
 
 using namespace std;
+using namespace code_machina;
 
 
 class IOPolling {
@@ -24,17 +26,15 @@ public:
 
 	// polls the IO queue that takes in requests from the InputThread / PolarSwitch
 
-	void listener(std::shared_ptr<vector<IOPolling::request>> bufferRead, std::shared_ptr<IOPolling::request[]> bufferWrite, vector<IOPolling::request> requestQueue) {
-		std::cout << &bufferRead;
+	void listener(BlockingCollection<request> queueRead, std::shared_ptr<IOPolling::request[]> bufferWrite, vector<IOPolling::request> requestQueue) {
 		int recentNumber = 0;
 		int counter = 0;
 		int lookBehindOne = 0;
 		int lookBehindTwo = 0;
-		while (true) {
-			std::cout << bufferRead->empty() << "\n";
-			if (!bufferRead->empty()) {
-				request r = bufferRead->front();
-				bufferRead->erase(bufferRead->begin());
+		while (!queueRead.is_completed()) {
+			request r;
+			auto status = queueRead.take(r);
+			if (status == BlockingCollectionStatus::Ok) {
 				recentNumber = r.number;
 				std::cout << "Read " << (int)r.number << "\n";
 
@@ -43,11 +43,13 @@ public:
 				lookBehindTwo = lookBehindOne;
 				lookBehindOne = r.modifiedCell;
 
-				*(bufferWrite.get() + counter) = r;
+				//*(bufferWrite.get() + counter) = &r;
 				requestQueue.emplace_back(r);
 
 				counter = (counter + 1) % 32;
+
 			}
+
 
 			/*	bool bothFound = false;
 			char* endPtr;
