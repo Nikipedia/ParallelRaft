@@ -14,11 +14,29 @@ public:
 	bool parallelRaft;
 
 	struct request {
+	public:
 		char number;
 		char type;
 		int lookBehind[2];
 		int modifiedCell;
 		char data[32];
+		request() {
+			number = 0;
+			type = 0;
+			modifiedCell = 0;
+		}
+		request(const request &obj) {
+			number = obj.number;
+			type = obj.type;
+			std::copy(obj.lookBehind, obj.lookBehind + 1, lookBehind);
+			modifiedCell = obj.modifiedCell;
+			std::copy(obj.data, obj.data + 31, data);
+		}
+		~request() {
+			delete[] &lookBehind;
+			delete[] &data;
+		}
+		
 	};
 
 
