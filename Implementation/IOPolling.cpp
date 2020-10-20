@@ -11,21 +11,24 @@ using namespace code_machina;
 
 class IOPolling {
 public:
-	bool parallelRaft;
-
 	struct request {
 	public:
-		char number;
-		char type;
-		int lookBehind[2];
-		int modifiedCell;
-		char data[32];
+		char number = 0;
+		char type = 0;
+		int* lookBehind;
+		int modifiedCell = 0;
+		char* data;
 		request() {
-			number = 0;
-			type = 0;
-			modifiedCell = 0;
+			//lookBehind = (int*)calloc(2, 4);
+			//data = (char*)calloc(32, 1);
+			data = new char[32];
+			lookBehind = new int[2];
 		}
-		request(const request &obj) {
+		request(const request& obj) {
+			//lookBehind = (int*)calloc(2, 4);
+			//data = (char*)calloc(32, 1);
+			data = new char[32];
+			lookBehind = new int[2];
 			number = obj.number;
 			type = obj.type;
 			std::copy(obj.lookBehind, obj.lookBehind + 1, lookBehind);
@@ -33,18 +36,24 @@ public:
 			std::copy(obj.data, obj.data + 31, data);
 		}
 		~request() {
-			delete[] &lookBehind;
-			delete[] &data;
+			//free(lookBehind);
+			//free(data);
+			delete data;
+			delete lookBehind;
 		}
-		
+		request(request&&) = default;
+		request& operator=(const request&) = default;
 	};
+
+
+};
 
 
 
 
 	// polls the IO queue that takes in requests from the InputThread / PolarSwitch
 
-	void listener(BlockingCollection<request> queueRead, std::shared_ptr<IOPolling::request[]> bufferWrite, vector<IOPolling::request> requestQueue) {
+	/*void listener(BlockingCollection<request> queueRead, std::shared_ptr<IOPolling::request[]> bufferWrite, vector<IOPolling::request> requestQueue) {
 		int recentNumber = 0;
 		int counter = 0;
 		int lookBehindOne = 0;
@@ -92,8 +101,7 @@ public:
 				*deletePointer = '0';
 				deletePointer++;
 			}
-		}*/
+		}
 			std::this_thread::sleep_for(std::chrono::milliseconds(20));
 		}
-	}
-};
+	}*/
