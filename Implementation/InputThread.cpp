@@ -5,13 +5,17 @@
 #include "BlockingCollection.h"
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <set>
+
+
 using namespace code_machina;
 
 
 class Threading {
 	//serves as the PolarSwitch that simulates lots of IO requests
 public:
-		//packages are sent every 50ms 
+	//packages are sent every 50ms 
 	int packageMillis = 50;
 
 	// this is the IO stack depth, the amount of IO requests at once
@@ -20,6 +24,7 @@ public:
 	//this is the mutex for the local vector containing all requests waiting for acknowledgements
 	std::mutex reqMutex;
 
+	static std::chrono::time_point<std::chrono::steady_clock> begin;
 	//std::vector<IOPolling::request> waiting;
 
 	//acts as polarswitch sending multiple requests
@@ -74,11 +79,12 @@ public:
 		}
 	}*/
 
-	void producer_thread(BlockingCollection<IOPolling::request*> * requestQueue) {
+	void producer_thread(BlockingCollection<IOPolling::request*>* requestQueue) {
 		int messageLimit = 0;
 		char totalCount = 0;
 		requestQueue->attach_producer();
-		while (messageLimit < 32)
+		begin = std::chrono::high_resolution_clock::now();
+		while (messageLimit < 100)
 		{
 			for (int i = 0; i < RequestsPerTick; i++) {
 				IOPolling::request r = IOPolling::request();
@@ -88,12 +94,11 @@ public:
 				// data block "index" to edit
 				r.modifiedCell = (char)(rand() % 255 + 1);
 				// small letter to write into the data blocks (assuming chars or strings as data)
-
-				r.data[1] = (char)(rand() % 26 + 65);
+				r.data[0] = (char)(rand() % 26 + 65);
 
 				//collection.add(r);
 				//std::cout << "request " << (int)totalCount << " written\n";
-				totalCount = (totalCount + 1) % 32;
+				totalCount = (totalCount + 1) % 256;
 
 				// blocks if collection.size() == collection.bounded_capacity()
 				requestQueue->add(&r);
@@ -104,8 +109,18 @@ public:
 		requestQueue->complete_adding();
 	}
 
+	//a separate thread to simulate network delay of 10-40 ms
+	void addToQueue(BlockingCollection<IOPolling::request*> * queue, IOPolling::request * request) {
+		srand(time(NULL));
+		std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 30 + 10));
+		if (!queue->is_completed()) {
+			queue->add(request);
+			
+		}
+	}
 
-	void consumer_thread(BlockingCollection<IOPolling::request*>* input, BlockingCollection<IOPolling::request*>* write, std::list<IOPolling::request*>* wait, std::vector<BlockingCollection<IOPolling::request*>*>* followers, BlockingCollection<IOPolling::request*>* leaderQueue) {
+
+	void consumer_thread(BlockingCollection<IOPolling::request*> * input, BlockingCollection<IOPolling::request*> * write, std::set<IOPolling::request*> * wait, std::vector<BlockingCollection<IOPolling::request*>*> * followers, BlockingCollection<IOPolling::request*> * leaderQueue) {
 		int recentNumber = 0;
 		int lookBehindOne = 0;
 		int lookBehindTwo = 0;
@@ -113,34 +128,35 @@ public:
 
 		if (followers->size() > 0) {
 			leader = true;
-
+			for (BlockingCollection<IOPolling::request*>* follower : *followers) {
+				follower->attach_producer();
+			}
 		}
 		input->attach_consumer();
 		write->attach_producer();
-		for (BlockingCollection<IOPolling::request*>* follower : *followers) {
-			follower->attach_producer();
-		}
 		if (leaderQueue != nullptr) {
 			leaderQueue->attach_producer();
 		}
-		while (!input->is_adding_completed() || !input->is_empty())
+		while (!input->is_completed())
 		{
 			IOPolling::request* currentDat;
 
 			// take will block if there is no data to be taken
 			auto status = input->take(currentDat);
 
-			IOPolling::request data = *currentDat;
-
 			if (status == BlockingCollectionStatus::Ok)
 			{
-				//std::cout << "Received " << data.type << " with number " << (int)data.number << "\n";
+				IOPolling::request data = *currentDat;
+				// if the data type is "input" we are the leader and send a write request to the followers
 				if (data.type == 'i') {
 					if (data.number > recentNumber + 2) {
 						//std::cout << "hole found for " << (int)data.number << "\n";
-						input->add(&data);
+						//input->add(&data);
 					}
 					else {
+						if (wait->size() == 1) {
+							std::cout << "big list";
+						}
 						recentNumber = data.number;
 						//std::cout << "Leader received " << (int)data.number << "\n";
 						data.type = 'w';
@@ -159,16 +175,20 @@ public:
 						if (leader) {
 							for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 								IOPolling::request copy = IOPolling::request(data);
-								follower->add(&copy);
+								//follower->add(&copy);
+								std::thread queueAdder(&Threading::addToQueue, this, &(*follower), &copy);
+								queueAdder.detach();
 							}
 						}
 
-						IOPolling::request copy = IOPolling::request(data);
+						IOPolling::request* copy = new IOPolling::request(data);
 						reqMutex.lock();
-						wait->emplace_front(&copy);
+					
+						wait->emplace(copy);
 						reqMutex.unlock();
 					}
 				}
+				// if the data type is write we are a follower and should answer with an acknowledgement
 				else if (data.type == 'w') {
 					if (data.number > recentNumber + 2) {
 						input->add(&data);
@@ -182,30 +202,37 @@ public:
 						if (!leader) {
 							IOPolling::request copy = IOPolling::request(data);
 							copy.type = 'a';
-							if(!leaderQueue->is_adding_completed())
-								leaderQueue->add(&copy);
+							if (!leaderQueue->is_adding_completed()) {
+								//leaderQueue->add(&copy);
+								std::thread queueAdder(&Threading::addToQueue, this, &(*leaderQueue), &copy);
+								queueAdder.detach();
+							}
 						}
 
 						IOPolling::request copy = IOPolling::request(data);
 						reqMutex.lock();
-						wait->emplace_front(&copy);
+						wait->emplace(&copy);
 						reqMutex.unlock();
 					}
 				}
+				// the leader receives 3 acknowledgements so it sends commit as soon as the counter reaches 2.
 				else if (data.type == 'a') {
 					reqMutex.lock();
+					std::cout << wait->size() << "\n";
 					IOPolling::request* deleted = nullptr;
 					for (IOPolling::request* r : *wait) {
 						if (r != nullptr && r->number == data.number) {
-							r->data[0]++;
-							if (r->data[0] > 1) {
+							r->timesUsed++;
+							
+							if (r->timesUsed > 1) {
 								deleted = r;
 							}
 							break;
 						}
 					}
 					if (deleted != nullptr) {
-						wait->remove(deleted);
+						std::cout << "commit " << (int)deleted->number << "\n";
+						wait->erase(deleted);
 					}
 					reqMutex.unlock();
 
@@ -218,21 +245,25 @@ public:
 						//send commit to all followers
 						for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 							IOPolling::request copy = IOPolling::request(copy2);
-							follower->add(&copy);
+							//follower->add(&copy);
+							std::thread queueAdder(&Threading::addToQueue, this, &(*follower), &copy);
+							queueAdder.detach();
 						}
+
 					}
 				}
+				// receiving commits means we write the data to disk and the commit to the log
 				else if (data.type == 'c') {
 					reqMutex.lock();
 					IOPolling::request* deleted = nullptr;
 					for (IOPolling::request* r : *wait) {
-						if (r!=nullptr && r->number == data.number) {
+						if (r != nullptr && r->number == data.number) {
 							deleted = r;
 							break;
 						}
 					}
 					if (deleted != nullptr) {
-						wait->remove(deleted);
+						wait->erase(deleted);
 					}
 					reqMutex.unlock();
 
@@ -247,30 +278,73 @@ public:
 		}
 	}
 
-	void writer_thread(BlockingCollection<IOPolling::request*>* writingQueue) {
+	void writer_thread(BlockingCollection<IOPolling::request*> * writingQueue, int nodeNumber) {
+		std::string s = std::to_string(nodeNumber);
 		fstream myfile;
-		myfile.open("log.txt");
+		string x = "log" + s;
+		x.append(".txt");
+		std::cout << x;
+		myfile.open(x, fstream::out);
 		writingQueue->attach_consumer();
-		while (!writingQueue->is_adding_completed() || !writingQueue->is_empty()) {
+		while (!writingQueue->is_completed()) {
 			IOPolling::request* currentDat;
 
 			// take will block if there is no data to be taken
 			auto status = writingQueue->take(currentDat);
 			int u = 0;
-			IOPolling::request data = *currentDat;
+			
 			if (status == BlockingCollectionStatus::Ok)
 			{
-				//myfile << data.number << data.type << data.modifiedCell << data.data << "\n";
-				std::cout << (int)data.number << " " << data.type << "\n";
+				IOPolling::request data = *currentDat;
+				if (data.type == 'c')
+					myfile << (int)data.number << " " << data.type << " "<< data.modifiedCell << "\n";
+				//std::cout << (int)data.number << " " << data.type << "\n";
 			}
 		}
 		myfile.close();
 	}
 
-	
+
 };
 
-int main() {
+///taken from https://stackoverflow.com/questions/865668/how-to-parse-command-line-arguments-in-c
+class InputParser {
+public:
+	InputParser(int& argc, char** argv) {
+		for (int i = 1; i < argc; ++i)
+			this->tokens.push_back(std::string(argv[i]));
+	}
+	/// @author iain
+	const std::string& getCmdOption(const std::string & option) const {
+		std::vector<std::string>::const_iterator itr;
+		itr = std::find(this->tokens.begin(), this->tokens.end(), option);
+		if (itr != this->tokens.end() && ++itr != this->tokens.end()) {
+			return *itr;
+		}
+		static const std::string empty_string("");
+		return empty_string;
+	}
+	/// @author iain
+	bool cmdOptionExists(const std::string & option) const {
+		return std::find(this->tokens.begin(), this->tokens.end(), option)
+			!= this->tokens.end();
+	}
+private:
+	std::vector <std::string> tokens;
+};
+
+std::chrono::time_point<std::chrono::steady_clock> Threading::begin = std::chrono::high_resolution_clock::now();
+
+int main(int argc, char** argv) {
+	InputParser input(argc, argv);
+	if (input.cmdOptionExists("-h")) {
+		// Do stuff
+	}
+	const std::string& filename = input.getCmdOption("-f");
+	if (!filename.empty()) {
+		// Do interesting things ...
+	}
+
 	//amount of I/O threads on each node
 	int threadCount = 1;
 
@@ -280,54 +354,81 @@ int main() {
 	Threading followerThread3;
 
 	//IOPolling leader;
-	BlockingCollection<IOPolling::request*> requestQueue(10);
+	BlockingCollection<IOPolling::request*> requestQueue(30);
 
-
-
-	list<IOPolling::request*> leaderWaiting(30);
-	list<IOPolling::request*> follower1Waiting(30);
-	list<IOPolling::request*> follower2Waiting(30);
-	list<IOPolling::request*> follower3Waiting(30);
-	BlockingCollection<IOPolling::request*> follower1Input(10);
-	BlockingCollection<IOPolling::request*> follower2Input(10);
-	BlockingCollection<IOPolling::request*> follower3Input(10);
+	std::set<IOPolling::request*> leaderWaiting;
+	std::set<IOPolling::request*> follower1Waiting;
+	std::set<IOPolling::request*> follower2Waiting;
+	std::set<IOPolling::request*> follower3Waiting;
+	BlockingCollection<IOPolling::request*> follower1Input(30);
+	BlockingCollection<IOPolling::request*> follower2Input(30);
+	BlockingCollection<IOPolling::request*> follower3Input(30);
 
 	std::vector<BlockingCollection<IOPolling::request*>*> followers;
 	followers.push_back(&follower1Input);
 	followers.push_back(&follower2Input);
 	followers.push_back(&follower3Input);
 
-	std::thread prod(&Threading::producer_thread, &leaderThread, &requestQueue);
-	
+	//testing:
+	/*IOPolling::request r;
+	std::thread tester(&Threading::addToQueue, &leaderThread, &requestQueue, &r);
+	tester.detach();
 
-	for (int i = 0; i < threadCount; i++) {
-		BlockingCollection<IOPolling::request*> leaderWrite(10);
+
+	BlockingCollection<IOPolling::request*> leaderWrite(10);
+	if (r.number != 1) {
+
 		std::thread leader_Consumer(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
-		std::thread leader_Writer(&Threading::writer_thread, &leaderThread, &leaderWrite);
-
-		BlockingCollection<IOPolling::request*> follower1Write(10);
-		BlockingCollection<IOPolling::request*> follower2Write(10);
-		BlockingCollection<IOPolling::request*> follower3Write(10);
-
-		std::thread follower1_Consumer(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
-
-		std::thread follower2_Consumer(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
-
-		std::thread follower3_Consumer(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
-
-		std::thread follower1_Write(&Threading::writer_thread, &followerThread1, &follower1Write);
-		std::thread follower2_Write(&Threading::writer_thread, &followerThread2, &follower2Write);
-		std::thread follower3_Write(&Threading::writer_thread, &followerThread3, &follower3Write);
+		leader_Consumer.detach();
 	}
+	*/
+	std::thread prod(&Threading::producer_thread, &leaderThread, &requestQueue);
 
-	
 
+
+	//the for loop produces crashes because the BlockingCollection doesnt operate correctly when its not referenced in main anymore.
+	//for (int i = 0; i < threadCount; i++) {
+	int i = 0;
+	BlockingCollection<IOPolling::request*> leaderWrite(30);
+	std::thread leader_Consumer(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
+	std::thread leader_Writer(&Threading::writer_thread, &leaderThread, &leaderWrite, i);
+
+	BlockingCollection<IOPolling::request*> follower1Write(30);
+	BlockingCollection<IOPolling::request*> follower2Write(30);
+	BlockingCollection<IOPolling::request*> follower3Write(30);
+
+	std::thread follower1_Consumer(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
+
+	std::thread follower2_Consumer(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
+
+	std::thread follower3_Consumer(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &requestQueue);
+
+	std::thread follower1_Write(&Threading::writer_thread, &followerThread1, &follower1Write, ++i);
+	std::thread follower2_Write(&Threading::writer_thread, &followerThread2, &follower2Write, ++i);
+	std::thread follower3_Write(&Threading::writer_thread, &followerThread3, &follower3Write, ++i);
+	prod.detach();
+	leader_Consumer.detach();
+	leader_Writer.detach();
+	follower1_Consumer.detach();
+	follower2_Consumer.detach();
+	follower3_Consumer.detach();
+	follower1_Write.detach();
+	follower2_Write.detach();
+	follower3_Write.detach();
+//}
+
+
+	while (!follower1Write.is_completed() //|| !follower2Write.is_completed() || !follower3Write.is_completed()) {
+		){
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::high_resolution_clock::now();
+	std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms" << std::endl;
+	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-	while (!requestQueue.is_adding_completed()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-	}
-
+	return 0;
+}
 	/*std::thread producer_thread([&requestQueue]() {
 		int messageLimit = 0;
 		char totalCount = 0;
@@ -444,12 +545,11 @@ int main() {
 	//std::vector<IOPolling::request> queuePointer;
 	//std::thread inputThread(threadedRequests, requestQueue);
 	//std::thread leaderReadThread(&IOPolling::listener, &leader, requestQueue, writingPointer, queuePointer);
-	
+
 	//inputThread.detach();
 	//inputThread.~thread();
 	//leaderReadThread.detach();
 	//leaderReadThread.~thread();
 	//IOPolling::request r = *(writingPointer.get());
 
-}
-	
+

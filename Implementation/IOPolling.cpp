@@ -11,18 +11,20 @@ using namespace code_machina;
 
 class IOPolling {
 public:
-	struct request {
+	class request {
 	public:
 		char number = 0;
 		char type = 0;
 		int* lookBehind;
 		int modifiedCell = 0;
+		int timesUsed = 0;
 		char* data;
 		request() {
 			//lookBehind = (int*)calloc(2, 4);
 			//data = (char*)calloc(32, 1);
 			data = new char[32];
 			lookBehind = new int[2];
+			memset(data, 0, sizeof data - 1);
 		}
 		request(const request& obj) {
 			//lookBehind = (int*)calloc(2, 4);
@@ -31,15 +33,18 @@ public:
 			lookBehind = new int[2];
 			number = obj.number;
 			type = obj.type;
+			timesUsed = obj.timesUsed;
 			std::copy(obj.lookBehind, obj.lookBehind + 1, lookBehind);
+			//memset(data, 0, sizeof data - 1);
 			modifiedCell = obj.modifiedCell;
 			std::copy(obj.data, obj.data + 31, data);
+			
 		}
 		~request() {
 			//free(lookBehind);
 			//free(data);
-			delete data;
-			delete lookBehind;
+			delete []data;
+			delete []lookBehind;
 		}
 		request(request&&) = default;
 		request& operator=(const request&) = default;
