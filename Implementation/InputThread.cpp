@@ -111,7 +111,18 @@ public:
 			std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
 			messageLimit += RequestsPerTick;
 		}
-		requestQueue->complete_adding();
+		// send a special message to confirm end of requests
+		IOPolling::request* r = new IOPolling::request();
+		r->number = totalCount;
+		// i for input, w for write, a for acknowledge, c for commit
+		r->type = 'e';
+		// blocks if collection.size() == collection.bounded_capacity()
+		requestQueue->add(r);
+
+		while (!requestQueue->is_empty()) {
+			std::cout << "not finished yet, still size: " << requestQueue->size() << "\n";
+			std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
+		}
 	}
 
 	//a separate thread to simulate network delay of 10-40 ms
@@ -129,7 +140,7 @@ public:
 		int lookBehindOne = 0;
 		int lookBehindTwo = 0;
 		bool leader = false;
-
+		bool waitingForFinish = false;
 		if (followers->size() > 0) {
 			leader = true;
 			for (BlockingCollection<IOPolling::request*>* follower : *followers) {
@@ -141,7 +152,7 @@ public:
 		if (leaderQueue != nullptr) {
 			leaderQueue->attach_producer();
 		}
-		while (!input->is_completed())
+		while ((leader && (!input->is_empty() || !waitingForFinish)) || (!leader && !input->is_completed()))
 		{
 			IOPolling::request* currentDat;
 
@@ -151,150 +162,173 @@ public:
 			if (status == BlockingCollectionStatus::Ok)
 			{
 				IOPolling::request data = *currentDat;
-				/*if (data.number != recentNumber)
-				{
-					if(leader) std::cout << "Leader falsely received " << (int)data.number << "\n";
-					if ((0 < (int)(data.number) - recentNumber && (int)(data.number) - recentNumber < 5) || ((int)(data.number) - recentNumber > 250)) {
-						std::cout << "Readded " << (int)data.number << "\n";
-						input->add(new IOPolling::request(data));
+				if (data.type == 'e') {
+					if (leader) {
+						waitingForFinish = true;
+						for (BlockingCollection<IOPolling::request*>* follower : *followers) {
+							IOPolling::request* copy = new IOPolling::request(data);
+							//follower->add(&copy);
+							std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
+							queueAdder.detach();
+						}
 					}
 				}
-				else {*/
-					// if the data type is "input" we are the leader and send a write request to the followers
-					if (data.type == 'i') {
-
-						/*if (wait->size() == 1) {
-							std::cout << "big list";
-						}*/
-						
-						std::cout << "Leader received " << (int)data.number << "\n";
-						data.type = 'w';
-
-						data.lookBehind[0] = lookBehindOne;
-						data.lookBehind[1] = lookBehindTwo;
-
-						lookBehindTwo = lookBehindOne;
-						lookBehindOne = data.modifiedCell;
-
-						//add copies to other queues
-
-						IOPolling::request* copy2 = new IOPolling::request(data);
-						write->add(copy2);
-
-						if (leader) {
-							for (BlockingCollection<IOPolling::request*>* follower : *followers) {
-								IOPolling::request* copy = new IOPolling::request(data);
-								//follower->add(&copy);
-								std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-								queueAdder.detach();
-							}
+				else {
+					if (leader) numberMutex.lock();
+					if (data.number != recentNumber)
+					{
+						//if(leader) std::cout << "Leader falsely received " << (int)data.number << "\n";
+						//if ((0 < (int)(data.number) - recentNumber && (int)(data.number) - recentNumber < 5) || ((int)(data.number) - recentNumber > 250)) {
+						if (data.type != 'a') {
+							//std::cout << "Readded " << (int)data.number << " with " << data.type << "\n";
+							//std::thread queueAdder(&Threading::addToQueue, this, input, new IOPolling::request(data));
+							//queueAdder.detach();
+							input->add(new IOPolling::request(data));
 						}
-
-						IOPolling::request* copy = new IOPolling::request(data);
-						reqMutex.lock();
-
-						wait->emplace(copy);
-						reqMutex.unlock();
-
 					}
-					// if the data type is write we are a follower and should answer with an acknowledgement
-					else if (data.type == 'w') {
+					else {
+						// if the data type is "input" we are the leader and send a write request to the followers
+						if (data.type == 'i') {
 
-						
-						//if (data.number % 2 == 0) {
-							//std::cout << "Follower Received " << (int)data.number << "\n";
-						//}
+							/*if (wait->size() == 1) {
+								std::cout << "big list";
+							}*/
 
-						IOPolling::request* copy2 = new IOPolling::request(data);
-						write->add(copy2);
+							std::cout << "Leader received " << (int)data.number << "\n";
+							data.type = 'w';
 
-						if (!leader) {
-							IOPolling::request* copy = new IOPolling::request(data);
-							copy->type = 'a';
-							if (!leaderQueue->is_adding_completed()) {
-								//leaderQueue->add(&copy);
-								std::thread queueAdder(&Threading::addToQueue, this, &(*leaderQueue), copy);
-								queueAdder.detach();
-							}
-						}
+							data.lookBehind[0] = lookBehindOne;
+							data.lookBehind[1] = lookBehindTwo;
 
-						IOPolling::request* copy = new IOPolling::request(data);
-						reqMutex.lock();
-						wait->emplace(copy);
-						reqMutex.unlock();
-					}
+							lookBehindTwo = lookBehindOne;
+							lookBehindOne = data.modifiedCell;
 
-					// the leader receives 3 acknowledgements so it sends commit as soon as the counter reaches 2.
-					else if (data.type == 'a') {
-						reqMutex.lock();
-						if (leader)std::cout << "list size" << wait->size() << "\n";
-						IOPolling::request* deleted = nullptr;
-						for (IOPolling::request* r : *wait) {
-							if (r != nullptr && r->number == data.number) {
-								r->timesUsed++;
+							//add copies to other queues
 
-								if (r->timesUsed > 1) {
-									deleted = r;
-								}
-								break;
-							}
-						}
-						if (deleted != nullptr) {
-							std::cout << "commit " << (int)deleted->number << "\n";
-							wait->erase(deleted);
-						}
-						reqMutex.unlock();
-
-						if (deleted != nullptr) {
-							recentNumber = (data.number + 1) % 256;
-							//write commit to hard drive
 							IOPolling::request* copy2 = new IOPolling::request(data);
-							copy2->type = 'c';
 							write->add(copy2);
 
-							//send commit to all followers
-							for (BlockingCollection<IOPolling::request*>* follower : *followers) {
+							if (leader) {
+								for (BlockingCollection<IOPolling::request*>* follower : *followers) {
+									IOPolling::request* copy = new IOPolling::request(data);
+									//follower->add(&copy);
+									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
+									queueAdder.detach();
+								}
+							}
+
+							IOPolling::request* copy = new IOPolling::request(data);
+							reqMutex.lock();
+
+							wait->emplace(copy);
+							reqMutex.unlock();
+
+						}
+						// if the data type is write we are a follower and should answer with an acknowledgement
+						else if (data.type == 'w') {
+
+
+							//if (data.number % 2 == 0) {
+								//std::cout << "Follower Received " << (int)data.number << "\n";
+							//}
+
+							IOPolling::request* copy2 = new IOPolling::request(data);
+							write->add(copy2);
+
+							if (!leader) {
 								IOPolling::request* copy = new IOPolling::request(data);
-								copy->type = 'c';
-								//follower->add(&copy);
-								std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-								queueAdder.detach();
+								copy->type = 'a';
+								if (!leaderQueue->is_adding_completed()) {
+									//leaderQueue->add(&copy);
+									std::thread queueAdder(&Threading::addToQueue, this, &(*leaderQueue), copy);
+									queueAdder.detach();
+								}
 							}
 
+							IOPolling::request* copy = new IOPolling::request(data);
+							reqMutex.lock();
+							wait->emplace(copy);
+							reqMutex.unlock();
 						}
-					}
-					// receiving commits means we write the data to disk and the commit to the log
-					else if (data.type == 'c') {
-					recentNumber = (data.number + 1) % 256;
-						reqMutex.lock();
-						IOPolling::request* deleted = nullptr;
-						for (IOPolling::request* r : *wait) {
-							if (r != nullptr && r->number == data.number) {
-								deleted = r;
-								break;
+
+						// the leader receives 3 acknowledgements so it sends commit as soon as the counter reaches 2.
+						else if (data.type == 'a') {
+							reqMutex.lock();
+							if (leader)std::cout << "list size" << wait->size() << "\n";
+							IOPolling::request* deleted = nullptr;
+							for (IOPolling::request* r : *wait) {
+								if (r != nullptr && r->number == data.number) {
+									r->timesUsed++;
+
+									if (r->timesUsed > 1) {
+										deleted = r;
+									}
+									break;
+								}
+							}
+							if (deleted != nullptr) {
+								std::cout << "commit " << (int)deleted->number << "\n";
+								wait->erase(deleted);
+							}
+							reqMutex.unlock();
+
+							if (deleted != nullptr) {
+								recentNumber = (data.number + 1) % 256;
+								//write commit to hard drive
+								IOPolling::request * copy2 = new IOPolling::request(data);
+								copy2->type = 'c';
+								write->add(copy2);
+
+								//send commit to all followers
+								for (BlockingCollection<IOPolling::request*>* follower : *followers) {
+									IOPolling::request* copy = new IOPolling::request(data);
+									copy->type = 'c';
+									//follower->add(&copy);
+									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
+									queueAdder.detach();
+								}
+
 							}
 						}
-						if (deleted != nullptr) {
-							wait->erase(deleted);
-						}
-						reqMutex.unlock();
+						// receiving commits means we write the data to disk and the commit to the log
+						else if (data.type == 'c') {
+							recentNumber = (data.number + 1) % 256;
+							reqMutex.lock();
+							IOPolling::request * deleted = nullptr;
+							for (IOPolling::request* r : *wait) {
+								if (r != nullptr && r->number == data.number) {
+									deleted = r;
+									break;
+								}
+							}
+							if (deleted != nullptr) {
+								wait->erase(deleted);
+							}
+							reqMutex.unlock();
 
-						IOPolling::request* copy2 = new IOPolling::request(data);
-						write->add(copy2);
+							IOPolling::request* copy2 = new IOPolling::request(data);
+							write->add(copy2);
+						}
 					}
+					if (leader) numberMutex.unlock();
 				}
-			//}
+				delete currentDat;
+			}
+			
 		}
-
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		write->complete_adding();
 		if (leader) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			
 			for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 				follower->complete_adding();
 			}
+			//remove this for tests
+			reqMutex.lock();
 			for (IOPolling::request* req : *wait) {
 				std::cout << "still in waiting: " << (int)req->number << " with " << req->timesUsed << " commit messages" << "\n";
 			}
+			reqMutex.unlock();
 		}
 	}
 
@@ -386,8 +420,8 @@ int main(int argc, char** argv) {
 
 
 	//IOPolling leader;
-	BlockingCollection<IOPolling::request*> requestQueue(30);
-	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(30);
+	BlockingCollection<IOPolling::request*> requestQueue(100);
+	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(60);
 	std::set<IOPolling::request*> leaderWaiting;
 	std::set<IOPolling::request*> follower1Waiting;
 	std::set<IOPolling::request*> follower2Waiting;
