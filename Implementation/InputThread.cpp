@@ -19,7 +19,7 @@ public:
 	int packageMillis = 50;
 
 	// this is the IO stack depth, the amount of IO requests at once
-	int RequestsPerTick = 8;
+	int RequestsPerTick = 16;
 
 	int totalRequests = 500;
 
@@ -216,7 +216,7 @@ public:
 								std::cout << "big list";
 							}*/
 
-							std::cout << "Leader received " << (int)data.number << "\n";
+							//std::cout << "Leader received " << (int)data.number << "\n";
 							data.type = 'w';
 
 							//add copies to other queues
@@ -270,7 +270,7 @@ public:
 						// the leader receives 3 acknowledgements so it sends commit as soon as the counter reaches 2.
 						else if (data.type == 'a') {
 							reqMutex.lock();
-							if (leader)std::cout << "list size" << wait->size() << "\n";
+							//if (leader)std::cout << "list size" << wait->size() << "\n";
 							IOPolling::request* deleted = nullptr;
 							for (IOPolling::request* r : *wait) {
 								if (r != nullptr && r->number == data.number) {
@@ -283,7 +283,7 @@ public:
 								}
 							}
 							if (deleted != nullptr) {
-								std::cout << "commit " << (int)deleted->number << "\n";
+								//std::cout << "commit " << (int)deleted->number << "\n";
 								wait->erase(deleted);
 							}
 							reqMutex.unlock();
@@ -394,12 +394,12 @@ public:
 					reset = true;
 				}
 				else {
+					int rct = recentNumber;
 					if (leader) {
-						numberMutex.lock();
 						// if data is filling a hole or doesnt conflict, we continue parallel execution, if theres a conflict we go into the strict mode
 						if (parallelExecution) {
-							if (data.number <= recentNumber && recentNumber - data.number < 100) allowed = true;
-							else if (data.number <= recentNumber + 2) {
+							if (data.number <= rct && rct - data.number < 100) allowed = true;
+							else if (data.number <= rct + 2) {
 								if (data.modifiedCell != data.lookBehind[0] && data.modifiedCell != data.lookBehind[1]) {
 									allowed = true;
 								}
@@ -416,7 +416,7 @@ public:
 							}
 						}
 						else {
-							if (recentNumber == data.number) {
+							if (rct == data.number) {
 								allowed = true;
 							}
 						}
@@ -505,13 +505,15 @@ public:
 							reqMutex.unlock();
 
 							if (deleted != nullptr) {
+								parallelMutex.lock();
 								if (!parallelExecution && data.number >= waitForNumber - 1) {
-									parallelMutex.lock();
 									parallelExecution = true;
-									parallelMutex.unlock();
 									//std::cout << "turned on parallel\n";
 								}
+								parallelMutex.unlock();
+								numberMutex.lock();
 								if(data.number + 1 > recentNumber) recentNumber = data.number + 1;
+								numberMutex.unlock();
 								//write commit to hard drive
 								IOPolling::request * copy2 = new IOPolling::request(data);
 								copy2->type = 'c';
@@ -530,7 +532,9 @@ public:
 						}
 						// receiving commits means we write the data to disk and the commit to the log
 						else if (data.type == 'c') {
+							numberMutex.lock();
 							recentNumber = data.number + 1;
+							numberMutex.unlock();
 							reqMutex.lock();
 							IOPolling::request * deleted = nullptr;
 							for (IOPolling::request* r : *wait) {
@@ -547,19 +551,16 @@ public:
 							IOPolling::request* copy2 = new IOPolling::request(data);
 							write->add(copy2);
 						}
-						if (leader) numberMutex.unlock();
 					}
 					//if(leader) std::cout << "Leader falsely received " << (int)data.number << "\n";
 						//if ((0 < (int)(data.number) - recentNumber && (int)(data.number) - recentNumber < 5) || ((int)(data.number) - recentNumber > 250)) {
-					else if (data.type != 'a' || !parallelExecution || data.number >= recentNumber) {
+					else if (data.type != 'a' || !parallelExecution || data.number >= rct) {
 						//std::cout << "Readded " << (int)data.number << " with " << data.type << "\n";
 						//std::thread queueAdder(&Threading::addToQueue, this, input, new IOPolling::request(data));
 						//queueAdder.detach();
-						if (leader) numberMutex.unlock();
 						input->add(new IOPolling::request(data));
 						
 					}
-					else if (leader) numberMutex.unlock();
 				}
 				if (wait->size() == 0 && leader && reset) {
 
@@ -655,7 +656,7 @@ int main(int argc, char** argv) {
 	}
 
 	//amount of I/O threads on each node
-	int threadCount = 1;
+	int threadCount = 2;
 	Threading leaderThread;
 	Threading followerThread1;
 	Threading followerThread2;
@@ -675,15 +676,15 @@ int main(int argc, char** argv) {
 
 
 	//IOPolling leader;
-	BlockingCollection<IOPolling::request*> requestQueue(100);
-	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(60);
+	BlockingCollection<IOPolling::request*> requestQueue(200);
+	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(120);
 	std::set<IOPolling::request*> leaderWaiting;
 	std::set<IOPolling::request*> follower1Waiting;
 	std::set<IOPolling::request*> follower2Waiting;
 	std::set<IOPolling::request*> follower3Waiting;
-	BlockingCollection<IOPolling::request*> follower1Input(30);
-	BlockingCollection<IOPolling::request*> follower2Input(30);
-	BlockingCollection<IOPolling::request*> follower3Input(30);
+	BlockingCollection<IOPolling::request*> follower1Input(60);
+	BlockingCollection<IOPolling::request*> follower2Input(60);
+	BlockingCollection<IOPolling::request*> follower3Input(60);
 
 	std::vector<BlockingCollection<IOPolling::request*>*> followers;
 	followers.push_back(&follower1Input);
@@ -705,37 +706,47 @@ int main(int argc, char** argv) {
 	*/
 	std::thread prod(&Threading::producer_thread, &leaderThread, &requestQueue);
 
-
+	std::vector<std::shared_ptr<std::thread>> threads;
 
 	//the for loop produces crashes because the BlockingCollection doesnt operate correctly when its not referenced in main anymore.
 	//for (int i = 0; i < threadCount; i++) {
 	int i = 0;
-	BlockingCollection<IOPolling::request*> leaderWrite(30);
-	BlockingCollection<IOPolling::request*> follower1Write(30);
-	BlockingCollection<IOPolling::request*> follower2Write(30);
-	BlockingCollection<IOPolling::request*> follower3Write(30);
+	BlockingCollection<IOPolling::request*> leaderWrite(60);
+	BlockingCollection<IOPolling::request*> follower1Write(60);
+	BlockingCollection<IOPolling::request*> follower2Write(60);
+	BlockingCollection<IOPolling::request*> follower3Write(60);
 	if (!parallelRaft) {
-		std::thread leader_Consumer(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
-		std::thread leader_Consum2(&Threading::consumer_thread, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
-		std::thread leader_Writer(&Threading::writer_thread, &leaderThread, &leaderWrite, i);
+		std::unique_ptr<std::thread> leader_Consumer (new std::thread(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
+		std::unique_ptr<std::thread> leader_Consum2(new std::thread(&Threading::consumer_thread, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
+		std::unique_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, i));
 
-		std::thread follower1_Consumer(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
-		std::thread follower2_Consumer(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
-		std::thread follower3_Consumer(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
+		std::unique_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+		std::unique_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+		std::unique_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
 
-		std::thread follower1_Write(&Threading::writer_thread, &followerThread1, &follower1Write, ++i);
-		std::thread follower2_Write(&Threading::writer_thread, &followerThread2, &follower2Write, ++i);
-		std::thread follower3_Write(&Threading::writer_thread, &followerThread3, &follower3Write, ++i);
+		std::unique_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, ++i));
+		std::unique_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, ++i));
+		std::unique_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, ++i));
 		prod.detach();
-		leader_Consumer.detach();
-		leader_Consum2.detach();
-		leader_Writer.detach();
-		follower1_Consumer.detach();
-		follower2_Consumer.detach();
-		follower3_Consumer.detach();
-		follower1_Write.detach();
-		follower2_Write.detach();
-		follower3_Write.detach();
+		leader_Consumer->detach();
+		leader_Consum2->detach();
+		leader_Writer->detach();
+		follower1_Consumer->detach();
+		follower2_Consumer->detach();
+		follower3_Consumer->detach();
+		follower1_Write->detach();
+		follower2_Write->detach();
+		follower3_Write->detach();
+
+		//threads.emplace(leader_Consumer);
+		//threads.emplace(leader_Consum2);
+		//threads.emplace(leader_Writer);
+		//threads.emplace(follower1_Consumer);
+		//threads.emplace(follower2_Consumer);
+		//threads.emplace(follower3_Consumer);
+		//threads.emplace(follower1_Write);
+		//threads.emplace(follower2_Write);
+		//threads.emplace(follower3_Write);
 
 		while (!follower1Write.is_completed() || !follower2Write.is_completed() || !follower3Write.is_completed()) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -748,31 +759,44 @@ int main(int argc, char** argv) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	}
 	else {
-		std::thread leader_Consumer(&Threading::consumer_thread_parallel, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
-		std::thread leader_Consum2(&Threading::consumer_thread_parallel, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr);
-		std::thread leader_Writer(&Threading::writer_thread, &leaderThread, &leaderWrite, i);
-
-		std::thread follower1_Consumer(&Threading::consumer_thread_parallel, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
-		std::thread follower2_Consumer(&Threading::consumer_thread_parallel, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
-		std::thread follower3_Consumer(&Threading::consumer_thread_parallel, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue);
-
-		std::thread follower1_Write(&Threading::writer_thread, &followerThread1, &follower1Write, ++i);
-		std::thread follower2_Write(&Threading::writer_thread, &followerThread2, &follower2Write, ++i);
-		std::thread follower3_Write(&Threading::writer_thread, &followerThread3, &follower3Write, ++i);
 		prod.detach();
-		leader_Consumer.detach();
-		leader_Consum2.detach();
-		leader_Writer.detach();
-		follower1_Consumer.detach();
-		follower2_Consumer.detach();
-		follower3_Consumer.detach();
-		follower1_Write.detach();
-		follower2_Write.detach();
-		follower3_Write.detach();
+		for (int n = 0; n < threadCount; n++) {
+			std::shared_ptr<std::thread> leader_Consumer(new std::thread(&Threading::consumer_thread_parallel, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
+			std::shared_ptr<std::thread> leader_Consum2(new std::thread(&Threading::consumer_thread_parallel, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
+			std::shared_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, ++i));
+				
+			std::shared_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+			std::shared_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+			std::shared_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+				 
+			std::shared_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, ++i));
+			std::shared_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, ++i));
+			std::shared_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, ++i));
+			
+			leader_Consumer->detach();
+			leader_Consum2->detach();
+			leader_Writer->detach();
+			follower1_Consumer->detach();
+			follower2_Consumer->detach();
+			follower3_Consumer->detach();
+			follower1_Write->detach();
+			follower2_Write->detach();
+			follower3_Write->detach();
 
+			threads.push_back(leader_Consumer);
+			threads.push_back(leader_Consum2);
+			threads.push_back(leader_Writer);
+			threads.push_back(follower1_Consumer);
+			threads.push_back(follower2_Consumer);
+			threads.push_back(follower3_Consumer);
+			threads.push_back(follower1_Write);
+			threads.push_back(follower2_Write);
+			threads.push_back(follower3_Write);
+		}
 		while (!follower1Write.is_completed() || !follower2Write.is_completed() || !follower3Write.is_completed()) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
+		threads.clear();
 		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::high_resolution_clock::now();
 		std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor ParallelRaft with " 
 			<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n" 
