@@ -13,7 +13,7 @@ class IOPolling {
 public:
 	class request {
 	public:
-		char number = 0;
+		unsigned int number = 0;
 		char type = 0;
 		int* lookBehind;
 		int modifiedCell = 0;
