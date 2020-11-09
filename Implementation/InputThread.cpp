@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <set>
+#include <cstring>
 
 
 using namespace code_machina;
@@ -16,12 +17,12 @@ class Threading {
 	//serves as the PolarSwitch that simulates lots of IO requests
 public:
 	//packages are sent every 50ms 
-	int packageMillis = 50;
+	int packageMillis = 20;
 
 	// this is the IO stack depth, the amount of IO requests at once
 	int RequestsPerTick = 16;
 
-	int totalRequests = 500;
+	int totalRequests = 5000;
 
 	int randomSpread = 250;
 
@@ -103,12 +104,12 @@ public:
 		unsigned int totalCount = 0;
 		requestQueue->attach_producer();
 		std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
-		begin = std::chrono::high_resolution_clock::now();
+		begin = std::chrono::steady_clock::now();
 		int lookBehindOne = 0;
 		int lookBehindTwo = 0;
 		while (messageLimit < totalRequests)
 		{
-			if (requestQueue->size() < 50) {
+			if (requestQueue->size() < 100) {
 				for (int i = 0; i < RequestsPerTick; i++) {
 					IOPolling::request* r = new IOPolling::request();
 					r->number = totalCount;
@@ -154,17 +155,18 @@ public:
 		}
 	}
 
-	//a separate thread to simulate network delay of 10-40 ms
+	//a separate thread to simulate network delay
 	void addToQueue(BlockingCollection<IOPolling::request*>* queue, IOPolling::request* request) {
 		srand(time(NULL));
 		switch (networkConditions) {
-		case 1: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10 + 5)); break;
-		case 2: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 30 + 10)); break;
-		case 3: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 30 + 10 + (rand() % 2) * 60)); break;
-		default: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 30 + 10)); break;
+		case 1: //std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 5 + 5)); 
+			break;
+		case 2: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10 + 15)); break;
+		case 3: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 20 + 20 + (rand() % 2) * 60)); break;
+		default: std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 10 + 15)); break;
 		}
 
-		if (!queue->is_completed()) {
+		if (!queue->is_adding_completed()) {
 			queue->add(request);
 		}
 	}
@@ -174,9 +176,7 @@ public:
 		IOPolling::request* copy = new IOPolling::request(*request);
 		copy->type = 'a';
 		if (!leaderQueue->is_adding_completed()) {
-			//leaderQueue->add(&copy);
-			std::thread queueAdder(&Threading::addToQueue, this, &(*leaderQueue), copy);
-			queueAdder.detach();
+			leaderQueue->add(copy);
 		}
 		delete request;
 	}
@@ -213,8 +213,9 @@ public:
 						for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 							IOPolling::request* copy = new IOPolling::request(data);
 							//follower->add(&copy);
-							std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-							queueAdder.detach();
+							if (!follower->is_adding_completed()) {
+								follower->add(copy);
+							}
 						}
 					}
 				}
@@ -251,8 +252,9 @@ public:
 								for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 									IOPolling::request* copy = new IOPolling::request(data);
 									//follower->add(&copy);
-									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-									queueAdder.detach();
+									if (!follower->is_adding_completed()) {
+										follower->add(copy);
+									}
 								}
 							}
 
@@ -314,8 +316,9 @@ public:
 									IOPolling::request* copy = new IOPolling::request(data);
 									copy->type = 'c';
 									//follower->add(&copy);
-									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-									queueAdder.detach();
+									if (!follower->is_adding_completed()) {
+										follower->add(copy);
+									}
 								}
 
 							}
@@ -369,6 +372,7 @@ public:
 		bool waitingForFinish = false;
 		bool allowed = false;
 		bool reset = false;
+		int rct = 0;
 		if (followers->size() > 0) {
 			leader = true;
 			for (BlockingCollection<IOPolling::request*>* follower : *followers) {
@@ -398,8 +402,9 @@ public:
 						for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 							IOPolling::request* copy = new IOPolling::request(data);
 							//follower->add(&copy);
-							std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-							queueAdder.detach();
+							if (!follower->is_adding_completed()) {
+								follower->add(copy);
+							}
 						}
 					}
 				}
@@ -408,7 +413,7 @@ public:
 					reset = true;
 				}
 				else {
-					int rct = recentNumber;
+					rct = recentNumber;
 					if (leader) {
 						// if data is filling a hole or doesnt conflict, we continue parallel execution, if theres a conflict we go into the strict mode
 						if (parallelExecution) {
@@ -458,8 +463,9 @@ public:
 								for (BlockingCollection<IOPolling::request*>* follower : *followers) {
 									IOPolling::request* copy = new IOPolling::request(data);
 									//follower->add(&copy);
-									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-									queueAdder.detach();
+									if (!follower->is_adding_completed()) {
+										follower->add(copy);
+									}
 								}
 							}
 
@@ -530,8 +536,9 @@ public:
 									IOPolling::request* copy = new IOPolling::request(data);
 									copy->type = 'c';
 									//follower->add(&copy);
-									std::thread queueAdder(&Threading::addToQueue, this, &(*follower), copy);
-									queueAdder.detach();
+									if (!follower->is_adding_completed()) {
+										follower->add(copy);
+									}
 								}
 
 							}
@@ -647,7 +654,7 @@ private:
 	std::vector <std::string> tokens;
 };
 
-std::chrono::time_point<std::chrono::steady_clock> Threading::begin = std::chrono::high_resolution_clock::now();
+std::chrono::time_point<std::chrono::steady_clock> Threading::begin = std::chrono::steady_clock::now();
 int Threading::networkConditions = 1;
 
 int main(int argc, char** argv) {
@@ -695,7 +702,7 @@ int main(int argc, char** argv) {
 
 	//IOPolling leader;
 	BlockingCollection<IOPolling::request*> requestQueue(200);
-	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(120);
+	BlockingCollection<IOPolling::request*> fromFollToLeaderQueue(200);
 	std::set<IOPolling::request*> leaderWaiting;
 	std::set<IOPolling::request*> follower1Waiting;
 	std::set<IOPolling::request*> follower2Waiting;
@@ -733,14 +740,15 @@ int main(int argc, char** argv) {
 	BlockingCollection<IOPolling::request*> follower1Write(60);
 	BlockingCollection<IOPolling::request*> follower2Write(60);
 	BlockingCollection<IOPolling::request*> follower3Write(60);
+	std::vector<BlockingCollection<IOPolling::request*>*> dummyFollowers;
 	if (!parallelRaft) {
 		std::unique_ptr<std::thread> leader_Consumer(new std::thread(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
 		std::unique_ptr<std::thread> leader_Consum2(new std::thread(&Threading::consumer_thread, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
 		std::unique_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, i));
 
-		std::unique_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
-		std::unique_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
-		std::unique_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+		std::unique_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &dummyFollowers, &fromFollToLeaderQueue));
+		std::unique_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &dummyFollowers, &fromFollToLeaderQueue));
+		std::unique_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &dummyFollowers, &fromFollToLeaderQueue));
 
 		std::unique_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, ++i));
 		std::unique_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, ++i));
@@ -769,10 +777,11 @@ int main(int argc, char** argv) {
 		while (!follower1Write.is_completed() || !follower2Write.is_completed() || !follower3Write.is_completed()) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
-		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::high_resolution_clock::now();
+		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::steady_clock::now();
 		std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor Raft with "
 			<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
-			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms" << std::endl;
+			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms" 
+			<< " network conditions: " << Threading::networkConditions << std::endl;
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	}
@@ -797,9 +806,9 @@ int main(int argc, char** argv) {
 			std::shared_ptr<std::thread> leader_Consumer(new std::thread(&Threading::consumer_thread_parallel, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
 			std::shared_ptr<std::thread> leader_Consum2(new std::thread(&Threading::consumer_thread_parallel, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
 
-			std::shared_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
-			std::shared_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
-			std::shared_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &std::vector<BlockingCollection<IOPolling::request*>*>(), &fromFollToLeaderQueue));
+			std::shared_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &dummyFollowers, &fromFollToLeaderQueue));
+			std::shared_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &dummyFollowers, &fromFollToLeaderQueue));
+			std::shared_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread_parallel, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &dummyFollowers, &fromFollToLeaderQueue));
 
 			leader_Consumer->detach();
 			leader_Consum2->detach();
@@ -819,10 +828,11 @@ int main(int argc, char** argv) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 		threads.clear();
-		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::high_resolution_clock::now();
+		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::steady_clock::now();
 		std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor ParallelRaft with "
 			<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
-			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms" << std::endl;
+			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms" 
+			<< " network conditions: " << Threading::networkConditions << ", I/O threads: " << threadCount << std::endl;
 		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 	}
 	return 0;

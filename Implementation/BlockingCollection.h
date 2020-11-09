@@ -26,6 +26,7 @@
 #include <chrono>
 #include <deque>
 #include <algorithm>
+#include <cstring>
 
 namespace code_machina {
 

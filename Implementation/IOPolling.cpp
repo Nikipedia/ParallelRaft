@@ -4,6 +4,7 @@
 #include <thread>
 #include <queue>
 #include "BlockingCollection.h"
+#include <cstring>
 
 using namespace std;
 using namespace code_machina;
