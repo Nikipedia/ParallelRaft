@@ -21,7 +21,7 @@ public:
 	int packageMillis = 5;
 
 	// this is the IO stack depth, the amount of IO requests at once
-	int RequestsPerTick = 32;
+	int RequestsPerTick = 64;
 
 	int totalRequests = 32000;
 
@@ -125,7 +125,7 @@ public:
 		int lookBehindTwo = -1;
 		while (messageLimit < totalRequests)
 		{
-			if (requestQueue->size() < 100) {
+			if (requestQueue->size() < 30) {
 				for (int i = 0; i < RequestsPerTick; i++) {
 					IOPolling::request* r = new IOPolling::request();
 					r->number = totalCount;
@@ -187,7 +187,7 @@ public:
 
 	void writeAndAck(BlockingCollection<IOPolling::request*> * leaderQueue, IOPolling::request * request) {
 		//myfile << (int)request->number << " " << request->type << " " << request->modifiedCell << "\n";
-		IOPolling::request* copy = new IOPolling::request(*request);
+		IOPolling::request* copy = new IOPolling::request(request);
 		copy->type = 'a';
 		if (!leaderQueue->is_adding_completed()) {
 			leaderQueue->add(copy);
@@ -439,9 +439,9 @@ public:
 					}
 				}
 				else {
+					pendingQueueMutex.lock();
 					rct = recentNumber;
 					// lock to prevent e.g. unnecessarily getting put into pending
-					pendingQueueMutex.lock();
 					// data is filling a hole
 					if (currentDat->number < rct) {
 						// there are no holes modifying this cell
@@ -466,12 +466,15 @@ public:
 						if (currentDat->number == rct + 1 && currentDat->type != 'a' && currentDat->type != 'c') {
 							blockedCells[currentDat->lookBehind[0]] = true;
 							pendingNumbers[currentDat->lookBehind[0]].insert(rct);
+							//std::cout << "blocked cell " << currentDat->lookBehind[0] << " for req " << rct << "\n";
 						}
 						else if (currentDat->number == rct + 2 && currentDat->type != 'a' && currentDat->type != 'c') {
 							blockedCells[currentDat->lookBehind[1]] = true;
 							blockedCells[currentDat->lookBehind[0]] = true;
 							pendingNumbers[currentDat->lookBehind[1]].insert(rct);
 							pendingNumbers[currentDat->lookBehind[0]].insert(rct + 1);
+							//std::cout << "blocked cell " << currentDat->lookBehind[1] << " for req " << rct << "\n";
+							//std::cout << "blocked cell " << currentDat->lookBehind[0] << " for req " << rct + 1 << "\n";
 						}
 						if (!blockedCells[currentDat->modifiedCell]) {
 							allowed = true;
@@ -531,11 +534,11 @@ public:
 
 							IOPolling::request* copy2 = new IOPolling::request(currentDat);
 
-							std::thread WriteAndAck(&Threading::writeAndAck, this, &(*leaderQueue), copy2);
-							WriteAndAck.detach();
+							//std::thread WriteAndAck(&Threading::writeAndAck, this, &(*leaderQueue), copy2);
+							//WriteAndAck.detach();
 							//writeAndAck(leaderQueue, copy2);
 
-							//write->add(copy2);
+							write->add(copy2);
 
 							// keep the cell locked but remove it from pendingNumbers as indicator that commit is possible
 							/*if (removeCellBlocker) {
@@ -600,6 +603,7 @@ public:
 									pendingNumbers[currentDat->modifiedCell].erase(currentDat->number);
 									// there are no remaining holes with that cell
 									if (pendingNumbers[currentDat->modifiedCell].size() == 0) {
+										//std::cout << "unblocked cell " << currentDat->modifiedCell << " for req " << currentDat->number << "\n";
 										blockedCells[currentDat->modifiedCell] = false;
 									}
 									// if there is a pending request of the lowest hole, insert into queue
@@ -609,15 +613,15 @@ public:
 										{
 											if (x->number == *pendingNumbers[currentDat->modifiedCell].begin()) {
 												input->add(x);
-												y = x;
-												break;
 											}
 										}
-										if (y != nullptr) pendingRequests[currentDat->modifiedCell].remove(y);
+										int f = *pendingNumbers[currentDat->modifiedCell].begin();
+										pendingRequests[currentDat->modifiedCell].remove_if([f](IOPolling::request* x) {return x->number == f; });
 									}
 								}
 								pendingQueueMutex.unlock();
 								delete deleted;
+
 							}
 						}
 						// receiving commits means we write the data to disk and the commit to the log
@@ -724,6 +728,7 @@ public:
 
 			if (status == BlockingCollectionStatus::Ok)
 			{
+				IOPolling::request r = *currentDat;
 				if (currentDat->type == 'c' || currentDat->type == 'w') {
 					myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
 					//if(nodeNumber==2)std::cout << (int)currentDat->number << " " << currentDat->type << "\n";
@@ -731,7 +736,7 @@ public:
 				}
 				if (currentDat->type == 'w' && !leader) {
 					//myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
-					IOPolling::request* copy = new IOPolling::request(*currentDat);
+					IOPolling::request* copy = new IOPolling::request(r);
 					copy->type = 'a';
 					if (!leaderQueue->is_adding_completed()) {
 						leaderQueue->add(copy);
@@ -778,7 +783,7 @@ int Threading::networkConditions = 1;
 
 int main(int argc, char** argv) {
 	InputParser input(argc, argv);
-	bool parallelRaft = true;
+	bool parallelRaft = false;
 	if (input.cmdOptionExists("-help")) {
 		std::cout << "Usage: -p for parallelRaft instead of Raft,\n-d followed by the IO stack depth,\n-c followed by the amount of IO threads per node\n" <<
 			"-n followed by the amount of requests\n";
@@ -787,7 +792,8 @@ int main(int argc, char** argv) {
 	if (input.cmdOptionExists("-p")) {
 		parallelRaft = true;
 	}
-	//else parallelRaft = false;
+	else parallelRaft = false;
+
 	//amount of I/O threads on each node
 	int threadCount = 1;
 	Threading leaderThread;
@@ -835,9 +841,9 @@ int main(int argc, char** argv) {
 	std::set<IOPolling::request*> follower1Waiting;
 	std::set<IOPolling::request*> follower2Waiting;
 	std::set<IOPolling::request*> follower3Waiting;
-	BlockingCollection<IOPolling::request*> follower1Input(200);
-	BlockingCollection<IOPolling::request*> follower2Input(200);
-	BlockingCollection<IOPolling::request*> follower3Input(200);
+	BlockingCollection<IOPolling::request*> follower1Input(400);
+	BlockingCollection<IOPolling::request*> follower2Input(400);
+	BlockingCollection<IOPolling::request*> follower3Input(400);
 
 	std::vector<BlockingCollection<IOPolling::request*>*> followers;
 	followers.push_back(&follower1Input);
@@ -864,10 +870,10 @@ int main(int argc, char** argv) {
 	//the for loop produces crashes because the BlockingCollection doesnt operate correctly when its not referenced in main anymore.
 	//for (int i = 0; i < threadCount; i++) {
 	int i = 0;
-	BlockingCollection<IOPolling::request*> leaderWrite(200);
-	BlockingCollection<IOPolling::request*> follower1Write(200);
-	BlockingCollection<IOPolling::request*> follower2Write(200);
-	BlockingCollection<IOPolling::request*> follower3Write(200);
+	BlockingCollection<IOPolling::request*> leaderWrite(400);
+	BlockingCollection<IOPolling::request*> follower1Write(400);
+	BlockingCollection<IOPolling::request*> follower2Write(400);
+	BlockingCollection<IOPolling::request*> follower3Write(400);
 	std::vector<BlockingCollection<IOPolling::request*>*> dummyFollowers;
 	if (!parallelRaft) {
 		std::unique_ptr<std::thread> leader_Consumer(new std::thread(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
