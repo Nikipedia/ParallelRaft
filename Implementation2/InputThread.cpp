@@ -25,10 +25,10 @@ public:
 
 	int totalRequests = 32000;
 
-	int randomSpread = 250;
+	int randomSpread = 255;
 
-	//std::vector< std::list< int > > pendingQueue;
-	std::mutex pendingQueueMutex;
+	//any blocking and pending management has to be under lock
+	std::mutex blockingMutex;
 	std::vector<std::set<int>> pendingNumbers = std::vector<std::set<int>>(256);
 	std::vector < std::list<IOPolling::request*>> pendingRequests = std::vector<std::list<IOPolling::request*>>(256);
 	std::vector<bool> blockedCells = vector<bool>(256);
@@ -47,73 +47,11 @@ public:
 
 	std::mutex numberMutex;
 
-	//bool parallelExecution = true;
-
-	//std::mutex parallelMutex;
-
-	//unsigned int waitForNumber = 0;
-
 	fstream myfile;
 
 	~Threading() {
-		//delete[]blockedCells;
-		//delete[]pendingNumbers;
-		//delete[]pendingRequests;
+
 	}
-
-	//std::vector<IOPolling::request> waiting;
-
-	//acts as polarswitch sending multiple requests
-	/*void threadedRequests(std::shared_ptr<IOPolling::request[]> leaderRequests)
-	{
-		srand(time(NULL));
-
-		//infinite loop of request sending by writing into the shared buffer
-		char totalCount = 0;
-		while (true) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
-			for (int m = 0; m < RequestsPerTick; m++) {
-				IOPolling::request r;
-				// requests are numbered from 1 to 255
-				r.number = totalCount;
-				// r for read, w for write, could contain more for e.g. new insertion of data
-				r.type = 'w';
-				// data block "index" to edit
-				r.modifiedCell = (char)(rand() % 255 + 1);
-				// small letter to write into the data blocks (assuming chars or strings as data)
-				r.data[0] = (char)(rand() % 26 + 65);
-				*(leaderRequests.get() + totalCount) = r;
-				std::cout << "request written\n";
-				totalCount = (totalCount + 1) % 32;
-			}
-		}
-	}*/
-
-	/*void threadedRequests(BlockingCollection<IOPolling::request*> collection)
-	{
-		srand(time(NULL));
-		//infinite loop of request sending by writing into the shared buffer
-		char totalCount = 0;
-		while (true) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(packageMillis));
-			for (int m = 0; m < RequestsPerTick; m++) {
-				IOPolling::request r = IOPolling::request();
-				// requests are numbered from 1 to 255
-				r.number = totalCount;
-				// r for read, w for write, could contain more for e.g. new insertion of data
-				r.type = 'w';
-				// data block "index" to edit
-				r.modifiedCell = (char)(rand() % 255 + 1);
-				// small letter to write into the data blocks (assuming chars or strings as data)
-
-				r.data[1] = (char)(rand() % 26 + 65);
-
-				//collection.add(r);
-				std::cout << "request written\n";
-				totalCount = (totalCount + 1) % 32;
-			}
-		}
-	}*/
 
 	void producer_thread(BlockingCollection<IOPolling::request*>* requestQueue) {
 		int messageLimit = 0;
@@ -135,7 +73,7 @@ public:
 						r->sentTime = std::chrono::steady_clock::now();
 					}
 					// data block "index" to edit
-					r->modifiedCell = (unsigned char)((rand() % 255) % randomSpread + 1);
+					r->modifiedCell = abs(rand() % randomSpread) + 1;
 					// small letter to write into the data blocks (assuming chars or strings as data)
 					r->data[0] = (char)(rand() % 26 + 65);
 					r->lookBehind[0] = lookBehindOne;
@@ -334,8 +272,8 @@ public:
 										follower->add(copy);
 									}
 								}
-								if (currentDat->number % 100 == 0 && currentDat->number != 0 && currentDat->number != totalRequests) 
-									{
+								if (currentDat->number % 100 == 0 && currentDat->number != 0 && currentDat->number != totalRequests)
+								{
 									std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::steady_clock::now();
 									latency += std::chrono::duration_cast<std::chrono::microseconds>(end - currentDat->sentTime).count();
 									latencyMeasures++;
@@ -345,7 +283,7 @@ public:
 						}
 						// receiving commits means we write the data to disk and the commit to the log
 						else if (currentDat->type == 'c') {
-							
+
 							reqMutex.lock();
 							IOPolling::request* deleted = nullptr;
 							for (IOPolling::request* r : *wait) {
@@ -439,7 +377,7 @@ public:
 					}
 				}
 				else {
-					pendingQueueMutex.lock();
+					blockingMutex.lock();
 					rct = recentNumber;
 					// lock to prevent e.g. unnecessarily getting put into pending
 					// data is filling a hole
@@ -502,7 +440,7 @@ public:
 						input->add(currentDat);
 						deleteCurrent = false;
 					}
-					pendingQueueMutex.unlock();
+					blockingMutex.unlock();
 					if (allowed) {
 						//if(leader)std::cout << "is in strict mode: " << !parallelExecution <<"\n";
 						// if the data type is "input" we are the leader and send a write request to the followers
@@ -534,18 +472,18 @@ public:
 
 							IOPolling::request* copy2 = new IOPolling::request(currentDat);
 
-							//std::thread WriteAndAck(&Threading::writeAndAck, this, &(*leaderQueue), copy2);
-							//WriteAndAck.detach();
+							std::thread WriteAndAck(&Threading::writeAndAck, this, &(*leaderQueue), copy2);
+							WriteAndAck.detach();
 							//writeAndAck(leaderQueue, copy2);
 
-							write->add(copy2);
+							//write->add(copy2);
 
 							// keep the cell locked but remove it from pendingNumbers as indicator that commit is possible
-							/*if (removeCellBlocker) {
-								pendingQueueMutex.lock();
+							if (removeCellBlocker) {
+								blockingMutex.lock();
 								pendingNumbers[currentDat->modifiedCell].erase(currentDat->number);
-								pendingQueueMutex.unlock();
-							}*/
+								blockingMutex.unlock();
+							}
 
 							deleteCurrent = false;
 							reqMutex.lock();
@@ -575,10 +513,8 @@ public:
 							reqMutex.unlock();
 
 							if (deleted != nullptr) {
+
 								
-								numberMutex.lock();
-								if (currentDat->number + 1 > recentNumber) recentNumber = currentDat->number + 1;
-								numberMutex.unlock();
 								//write commit to hard drive
 								IOPolling::request * copy2 = new IOPolling::request(currentDat);
 								copy2->type = 'c';
@@ -598,7 +534,10 @@ public:
 									latency += std::chrono::duration_cast<std::chrono::microseconds>(end - currentDat->sentTime).count();
 									latencyMeasures++;
 								}
-								pendingQueueMutex.lock();
+								blockingMutex.lock();
+								numberMutex.lock();
+								if (currentDat->number + 1 > recentNumber) recentNumber = currentDat->number + 1;
+								numberMutex.unlock();
 								if (removeCellBlocker || blockedCells[currentDat->modifiedCell]) {
 									pendingNumbers[currentDat->modifiedCell].erase(currentDat->number);
 									// there are no remaining holes with that cell
@@ -616,17 +555,17 @@ public:
 											}
 										}
 										int f = *pendingNumbers[currentDat->modifiedCell].begin();
-										pendingRequests[currentDat->modifiedCell].remove_if([f](IOPolling::request* x) {return x->number == f; });
+										pendingRequests[currentDat->modifiedCell].remove_if([f](IOPolling::request * x) {return x->number == f; });
 									}
 								}
-								pendingQueueMutex.unlock();
+								blockingMutex.unlock();
 								delete deleted;
 
 							}
 						}
 						// receiving commits means we write the data to disk and the commit to the log
 						else if (currentDat->type == 'c') {
-							
+
 							reqMutex.lock();
 							IOPolling::request* deleted = nullptr;
 							for (IOPolling::request* r : *wait) {
@@ -641,15 +580,14 @@ public:
 							reqMutex.unlock();
 
 							if (deleted != nullptr) {
-								numberMutex.lock();
+								blockingMutex.lock();
 								if (currentDat->number + 1 > recentNumber) recentNumber = currentDat->number + 1;
-								numberMutex.unlock();
-								pendingQueueMutex.lock();
 								if (removeCellBlocker || blockedCells[currentDat->modifiedCell]) {
 									pendingNumbers[currentDat->modifiedCell].erase(currentDat->number);
 									// there are no remaining holes with that cell
 									if (pendingNumbers[currentDat->modifiedCell].size() == 0) {
 										blockedCells[currentDat->modifiedCell] = false;
+										//std::cout << "unlocked cell " << currentDat->modifiedCell << "\n";
 									}
 									// if there is a pending request of the lowest hole, insert into queue
 									else {
@@ -662,9 +600,9 @@ public:
 										int f = *pendingNumbers[currentDat->modifiedCell].begin();
 										pendingRequests[currentDat->modifiedCell].remove_if([f](IOPolling::request * x) {return x->number == f; });
 									}
-									
+
 								}
-								pendingQueueMutex.unlock();
+								blockingMutex.unlock();
 								deleteCurrent = false;
 								write->add(currentDat);
 
@@ -672,11 +610,11 @@ public:
 							}
 							else {
 								deleteCurrent = false;
-								pendingQueueMutex.lock();
+								blockingMutex.lock();
 								pendingRequests[currentDat->modifiedCell].push_back(currentDat);
 								pendingNumbers[currentDat->modifiedCell].insert(currentDat->number);
 								blockedCells[currentDat->modifiedCell] = true;
-								pendingQueueMutex.unlock();
+								blockingMutex.unlock();
 							}
 						}
 					}
@@ -692,7 +630,7 @@ public:
 				}
 				/*data.data = nullptr;
 				data.lookBehind = nullptr;*/
-				if(deleteCurrent) delete currentDat;
+				if (deleteCurrent) delete currentDat;
 			}
 
 		}
@@ -712,13 +650,13 @@ public:
 		}
 	}
 
-	void writer_thread(BlockingCollection<IOPolling::request*> * writingQueue, BlockingCollection<IOPolling::request*>* leaderQueue, bool leader, int nodeNumber) {
+	void writer_thread(BlockingCollection<IOPolling::request*> * writingQueue, BlockingCollection<IOPolling::request*> * leaderQueue, bool leader, int nodeNumber) {
 		std::string s = std::to_string(nodeNumber);
 		string x = "log" + s;
 		x.append(".txt");
 		myfile.open(x, fstream::out);
 		writingQueue->attach_consumer();
-		std::cout << x;
+		//std::cout << x;
 		while (!writingQueue->is_completed()) {
 			IOPolling::request* currentDat;
 
@@ -730,7 +668,7 @@ public:
 			{
 				IOPolling::request r = *currentDat;
 				if (currentDat->type == 'c' || currentDat->type == 'w') {
-					myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
+					//myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
 					//if(nodeNumber==2)std::cout << (int)currentDat->number << " " << currentDat->type << "\n";
 
 				}
@@ -744,7 +682,7 @@ public:
 				}
 				delete currentDat;
 			}
-			
+
 		}
 		myfile.close();
 	}
@@ -783,16 +721,18 @@ int Threading::networkConditions = 1;
 
 int main(int argc, char** argv) {
 	InputParser input(argc, argv);
-	bool parallelRaft = false;
+	bool parallelRaft = true;
+	bool testing = false;
 	if (input.cmdOptionExists("-help")) {
-		std::cout << "Usage: -p for parallelRaft instead of Raft,\n-d followed by the IO stack depth,\n-c followed by the amount of IO threads per node\n" <<
-			"-n followed by the amount of requests\n";
+		std::cout << "Usage: -t for testing mode, -p for parallelRaft instead of Raft,\n-d followed by the IO stack depth,\n-c followed by the amount of IO threads per node\n" <<
+			"-n followed by the amount of requests, -m for the milliseconds between each package, -r for random range of cells\n";
 	}
-
+	if (input.cmdOptionExists("-t")) {
+		testing = true;
+	}
 	if (input.cmdOptionExists("-p")) {
 		parallelRaft = true;
 	}
-	else parallelRaft = false;
 
 	//amount of I/O threads on each node
 	int threadCount = 1;
@@ -820,6 +760,20 @@ int main(int argc, char** argv) {
 		if (count > 0 && count < 1000000)
 			leaderThread.totalRequests = count;
 		else leaderThread.totalRequests = 5000;
+	}
+	const std::string& inputString4 = input.getCmdOption("-m");
+	if (!inputString4.empty()) {
+		int count = std::stoi(inputString4);
+		if (count > 0 && count < 100)
+			leaderThread.packageMillis = count;
+		else leaderThread.packageMillis = 5;
+	}
+	const std::string& inputString5 = input.getCmdOption("-r");
+	if (!inputString5.empty()) {
+		int count = std::stoi(inputString5);
+		if (count > 1 && count < 256)
+			leaderThread.randomSpread = count;
+		else leaderThread.randomSpread = 255;
 	}
 
 	for (int i = 0; i < 256; i++) {
@@ -912,12 +866,18 @@ int main(int argc, char** argv) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::steady_clock::now();
-		std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor Raft with "
-			<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
-			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms"
-			<< " latency: " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "us" << std::endl;
+		if (!testing) {
+			std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor Raft with "
+				<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
+				<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms"
+				<< " latency: " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "us" << std::endl;
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		}
+		else
+		{
+			std::cout << leaderThread.totalRequests / std::chrono::duration_cast<std::chrono::seconds>(end - Threading::begin).count() << ", " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "\t";
+		}
 	}
 	else {
 		prod.detach();
@@ -963,14 +923,21 @@ int main(int argc, char** argv) {
 		}
 		threads.clear();
 		std::chrono::time_point<std::chrono::steady_clock> end = std::chrono::steady_clock::now();
-		std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor ParallelRaft with "
-			<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
-			<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms"
-			<< " latency: " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "us, I/O threads: " << threadCount << std::endl;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		if (!testing) {
+			std::cout << "Execution time of " << std::chrono::duration_cast<std::chrono::milliseconds>(end - Threading::begin).count() << "ms\nfor ParallelRaft with "
+				<< leaderThread.RequestsPerTick << " requests every " << leaderThread.packageMillis << "milliseconds:\n"
+				<< "Total requests: " << leaderThread.totalRequests << " , total producing time: " << (leaderThread.totalRequests / leaderThread.RequestsPerTick) * leaderThread.packageMillis << "ms"
+				<< " latency: " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "us, I/O threads: " << threadCount << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		}
+		else
+		{
+			std::cout << leaderThread.totalRequests / std::chrono::duration_cast<std::chrono::seconds>(end - Threading::begin).count() << ", " << ((float)leaderThread.latency) / leaderThread.latencyMeasures << "\t";
+		}
 	}
-	system("pause");
+	if(!testing)system("pause");
 	return 0;
+
 }
 /*std::thread producer_thread([&requestQueue]() {
 	int messageLimit = 0;
