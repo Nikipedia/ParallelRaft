@@ -10,7 +10,7 @@ using namespace std;
 using namespace code_machina;
 
 
-class IOPolling {
+class IO {
 public:
 	class request {
 	public:
