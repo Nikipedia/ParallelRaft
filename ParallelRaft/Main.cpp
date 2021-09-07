@@ -1,23 +1,27 @@
 #include <thread>
 #include <memory>
 #include <random>
-#include "IOPolling.cpp"
 #include "BlockingCollection.h"
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <set>
 #include <cstring>
+#include <list>
+#include "Request.cpp"
+using namespace std;
 
 
 using namespace code_machina;
 
-
+/// <summary>
+/// Main class that simulates IO requests and either manages them in order (Raft) or parallel/out of order (ParallelRaft)
+/// </summary>
 class Threading {
-	//serves as the PolarSwitch that simulates lots of IO requests
+	
 public:
 
-	//packages are sent every 50ms 
+	//packages are sent every x ms 
 	int packageMillis = 1;
 
 	// this is the IO stack depth, the amount of IO requests at once
@@ -27,7 +31,7 @@ public:
 
 	int randomSpread = 255;
 
-	//any blocking and pending management has to be under lock
+	// any blocking and pending management has to be under lock
 	std::mutex blockingMutex;
 	std::vector<std::set<int>> pendingNumbers = std::vector<std::set<int>>(256);
 	std::vector < std::list<IO::request*>> pendingRequests = std::vector<std::list<IO::request*>>(256);
@@ -49,6 +53,10 @@ public:
 
 	fstream myfile;
 
+	/// <summary>
+	/// the producer thread creates requests according to the parameters and puts them into the request queue. The cells these requests want to edit are chosen randomly (with .
+	/// </summary>
+	/// <param name="requestQueue"></param>
 	void producer_thread(BlockingCollection<IO::request*>* requestQueue) {
 		int messageLimit = 0;
 		unsigned int totalCount = 0;
@@ -59,12 +67,15 @@ public:
 		int lookBehindTwo = -1;
 		while (messageLimit < totalRequests)
 		{
+			
 			if (requestQueue->size() < 30) {
 				for (int i = 0; i < RequestsPerTick; i++) {
 					IO::request* r = new IO::request();
 					r->number = totalCount;
 					// i for input, w for write, a for acknowledge, c for commit
 					r->type = 'i';
+
+					// track the time of some packets to get a representative average
 					if (totalCount % 100 == 0 && totalCount != 0 && totalCount != totalRequests) {
 						r->sentTime = std::chrono::steady_clock::now();
 					}
@@ -72,6 +83,8 @@ public:
 					r->modifiedCell = abs(rand() % randomSpread) + 1;
 					// small letter to write into the data blocks (assuming chars or strings as data)
 					r->data[0] = (char)(rand() % 26 + 65);
+
+					// track the data blocks edited by previous packets (that might not arrive earlier)
 					r->lookBehind[0] = lookBehindOne;
 					r->lookBehind[1] = lookBehindTwo;
 
@@ -100,8 +113,12 @@ public:
 		}
 	}
 
+	/// <summary>
+	/// created as a thread to parallelize the sending of acknowledgements, could be further optimized using multiple worker threads instead of repeated thread creation
+	/// </summary>
+	/// <param name="leaderQueue"></param>
+	/// <param name="request"></param>
 	void writeAndAck(BlockingCollection<IO::request*> * leaderQueue, IO::request * request) {
-		//myfile << (int)request->number << " " << request->type << " " << request->modifiedCell << "\n";
 		IO::request* copy = new IO::request(request);
 		copy->type = 'a';
 		if (!leaderQueue->is_adding_completed()) {
@@ -112,7 +129,6 @@ public:
 
 	//Raft version can only take the elements in correct order
 	void consumer_thread(BlockingCollection<IO::request*> * input, BlockingCollection<IO::request*> * write, std::set<IO::request*> * wait, std::vector<BlockingCollection<IO::request*>*> * followers, BlockingCollection<IO::request*> * leaderQueue) {
-		//recentNumber = 0;
 		bool leader = false;
 		bool waitingForFinish = false;
 		if (followers->size() > 0) {
@@ -135,12 +151,12 @@ public:
 
 			if (status == BlockingCollectionStatus::Ok)
 			{
+				// end of transmission gets broadcasted to followers
 				if (currentDat->type == 'e') {
 					if (leader) {
 						waitingForFinish = true;
 						for (BlockingCollection<IO::request*>* follower : *followers) {
 							IO::request* copy = new IO::request(currentDat);
-							//follower->add(&copy);
 							if (!follower->is_adding_completed()) {
 								follower->add(copy);
 							}
@@ -314,6 +330,7 @@ public:
 			{
 				allowed = false;
 				deleteCurrent = true;
+				// end of transmission gets broadcasted to followers
 				if (currentDat->type == 'e') {
 					if (leader) {
 						waitingForFinish = true;
@@ -562,7 +579,13 @@ public:
 		}
 	}
 
-	void writer_thread(BlockingCollection<IO::request*> * writingQueue, BlockingCollection<IO::request*> * leaderQueue, bool leader, int nodeNumber) {
+
+	/// <summary>
+	/// this thread logs all writes and commits into a log file that could be used for information recovery
+	/// </summary>
+	/// <param name="writingQueue">requests that should be logged </param>
+	/// <param name="nodeNumber">unique identifier for the file name </param>
+	void writer_thread(BlockingCollection<IO::request*> * writingQueue, int nodeNumber) {
 		std::string s = std::to_string(nodeNumber);
 		string x = "log" + s;
 		x.append(".txt");
@@ -573,13 +596,12 @@ public:
 
 			// take will block if there is no data to be taken
 			auto status = writingQueue->take(currentDat);
-			int u = 0;
 
 			if (status == BlockingCollectionStatus::Ok)
 			{
-				IO::request r = *currentDat;
+				//IO::request r = *currentDat;
 				if (currentDat->type == 'c' || currentDat->type == 'w') {
-					//myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
+					myfile << (int)currentDat->number << " " << currentDat->type << " " << currentDat->modifiedCell << "\n";
 				}
 				delete currentDat;
 			}
@@ -715,15 +737,15 @@ int main(int argc, char** argv) {
 	if (!parallelRaft) {
 		std::unique_ptr<std::thread> leader_Consumer(new std::thread(&Threading::consumer_thread, &leaderThread, &requestQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
 		std::unique_ptr<std::thread> leader_Consum2(new std::thread(&Threading::consumer_thread, &leaderThread, &fromFollToLeaderQueue, &leaderWrite, &leaderWaiting, &followers, nullptr));
-		std::unique_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, nullptr, true, i));
+		std::unique_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, i));
 
 		std::unique_ptr<std::thread> follower1_Consumer(new std::thread(&Threading::consumer_thread, &followerThread1, &follower1Input, &follower1Write, &follower1Waiting, &dummyFollowers, &fromFollToLeaderQueue));
 		std::unique_ptr<std::thread> follower2_Consumer(new std::thread(&Threading::consumer_thread, &followerThread2, &follower2Input, &follower2Write, &follower2Waiting, &dummyFollowers, &fromFollToLeaderQueue));
 		std::unique_ptr<std::thread> follower3_Consumer(new std::thread(&Threading::consumer_thread, &followerThread3, &follower3Input, &follower3Write, &follower3Waiting, &dummyFollowers, &fromFollToLeaderQueue));
 
-		std::unique_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, &fromFollToLeaderQueue, false, ++i));
-		std::unique_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, &fromFollToLeaderQueue, false, ++i));
-		std::unique_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, &fromFollToLeaderQueue, false, ++i));
+		std::unique_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, ++i));
+		std::unique_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, ++i));
+		std::unique_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, ++i));
 		prod.detach();
 		leader_Consumer->detach();
 		leader_Consum2->detach();
@@ -755,13 +777,13 @@ int main(int argc, char** argv) {
 	else {
 		prod.detach();
 
-		std::shared_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, nullptr, true, ++i));
+		std::shared_ptr<std::thread> leader_Writer(new std::thread(&Threading::writer_thread, &leaderThread, &leaderWrite, ++i));
 		leader_Writer->detach();
 		threads.push_back(leader_Writer);
 
-		std::shared_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, &fromFollToLeaderQueue, false, ++i));
-		std::shared_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, &fromFollToLeaderQueue, false, ++i));
-		std::shared_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, &fromFollToLeaderQueue, false, ++i));
+		std::shared_ptr<std::thread> follower1_Write(new std::thread(&Threading::writer_thread, &followerThread1, &follower1Write, ++i));
+		std::shared_ptr<std::thread> follower2_Write(new std::thread(&Threading::writer_thread, &followerThread2, &follower2Write, ++i));
+		std::shared_ptr<std::thread> follower3_Write(new std::thread(&Threading::writer_thread, &followerThread3, &follower3Write, ++i));
 		follower1_Write->detach();
 		follower2_Write->detach();
 		follower3_Write->detach();
